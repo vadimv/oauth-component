@@ -11,6 +11,10 @@ import java.util.function.Supplier;
 
 import static rsp.html.HtmlDsl.*;
 
+/**
+ * This class is for a wrapper component supporting for basic access authentication for a wrapped components tree.
+ * @param <S> a type of the wrapped component's state
+ */
 public class BasicAuthComponentDefinition<S> extends StatefulComponentDefinition<BasicAuthComponentDefinition.AuthorizationState<S>> {
     private final System.Logger logger = System.getLogger(getClass().getName());
     private final HttpRequest httpRequest;
@@ -29,16 +33,16 @@ public class BasicAuthComponentDefinition<S> extends StatefulComponentDefinition
     @Override
     public ComponentStateSupplier<AuthorizationState<S>> stateSupplier() {
         try {
-            final String user = authorized(httpRequest);
+            final String user = authorizedUser(httpRequest);
             if (user != null) {
-                logger.log(System.Logger.Level.DEBUG, "Base authorization: authorised");
+                logger.log(System.Logger.Level.DEBUG, "Basic access authentication: authorised");
                 return (_, lookup)  -> {
                     lookup.put("user", user);
                     return new AuthorizationState.Authorized<>(componentDefinition.stateSupplier());
                 };
             }
         } catch (AuthException e) {
-            logger.log(System.Logger.Level.ERROR, "Base authorization error", e);
+            logger.log(System.Logger.Level.ERROR, "Basic access authentication error", e);
         }
         logger.log(System.Logger.Level.DEBUG, "Base authorization: not authorised");
         return (_, lookup) -> {
@@ -61,7 +65,7 @@ public class BasicAuthComponentDefinition<S> extends StatefulComponentDefinition
         };
     }
 
-    private String authorized(HttpRequest httpRequest) throws AuthException {
+    private String authorizedUser(HttpRequest httpRequest) throws AuthException {
         final var authorizationHeader = httpRequest.header("Authorization");
         if (authorizationHeader.isPresent()) {
             final String authorizationHeaderValue = authorizationHeader.get();
