@@ -11,7 +11,7 @@ import java.util.function.Supplier;
 
 import static rsp.html.HtmlDsl.*;
 
-    public class BasicAuthComponentDefinition<S> extends StatefulComponentDefinition<BasicAuthComponentDefinition.AuthorizationState<S>> {
+public class BasicAuthComponentDefinition<S> extends StatefulComponentDefinition<BasicAuthComponentDefinition.AuthorizationState<S>> {
     private final System.Logger logger = System.getLogger(getClass().getName());
     private final HttpRequest httpRequest;
     private final Supplier<BasicCredentials> basicCredentialsSupplier;
