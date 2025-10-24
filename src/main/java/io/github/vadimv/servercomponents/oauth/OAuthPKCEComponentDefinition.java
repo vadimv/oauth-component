@@ -70,16 +70,18 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
 
                     // 4. Exchange the Authorization Code
                     // build a POST request to the token endpoint
-                    final String tokenRequestURL = "https://authorization-server.com/token";
-                    final String tokenRequestQueryParametersString = "grant_type=authorization_code" +
+                    final String tokenRequestURL = "http://localhost:8080/default/token";
+                    final String tokenRequestQueryParametersString =
+                            "grant_type=authorization_code" +
                             "&client_id=4aw6ppymEN7zxUVJL9wB1WSc" +
                             "&client_secret=BfoMogOMp9ZFenyvQhNU5OE-F9iv9ONr8yKByo8VKw1uFtKH" +
-                            "&redirect_uri=https://www.oauth.com/playground/authorization-code-with-pkce.html" +
+                            "&redirect_uri=http://localhost:8085/callback" +
                             "&code=" + codeQueryParameterValue +
                             "&code_verifier=" + codeVerifier.codeVerifier;
 
                     final java.net.http.HttpRequest tokenRequest = java.net.http.HttpRequest.newBuilder()
                             .uri(URI.create(tokenRequestURL))
+                            .header("Content-Type", "application/x-www-form-urlencoded")
                             .POST(java.net.http.HttpRequest.BodyPublishers.ofString(tokenRequestQueryParametersString))
                             .build();
                     final java.net.http.HttpResponse<String> response;
@@ -91,7 +93,7 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                         }
                     }
                     if (response.statusCode() != 200) {
-                        throw new AuthException("Unexpected HTTP status code while requesting a token at:" + tokenRequest);
+                        throw new AuthException("Unexpected HTTP status code: "+ response.statusCode() + " while requesting a token at:" + tokenRequestURL);
                     }
                     final String body = response.body();
 
@@ -112,7 +114,7 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                            authorizedSessions.put(codeVerifier.deviceId, codeVerifier.deviceId);
 
                            return (_, lookup) -> {
-                               lookup.put("user", "user1");
+                               lookup.put("user", scope);
                                return new AuthorizationState.Authorized<>(protectedComponentDefinition.stateSupplier());
                            };
                        }
@@ -124,7 +126,7 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                 } else {
                     logger.log(System.Logger.Level.DEBUG, "Required callback query parameter(s) 'state' and/or 'code' is missing.");
                 }
-             } else if (httpRequest.deviceId().isPresent()) {
+             } else if (httpRequest.deviceId().isPresent() && httpRequest.path.startsWith("login")) {
                 logger.log(System.Logger.Level.DEBUG, "Staring OAuth 2 PKCE flow..");
 
                 // 1. Create a Code Verifier and Challenge
@@ -138,14 +140,14 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
 
                 // 2. Build the Authorization URL
                 final String state = generateRandomString(16);
-                final String authorizationURL = "https://authorization-server.com/authorize?" +
-                        "  response_type=code" +
-                        "  &client_id=4aw6ppymEN7zxUVJL9wB1WSc" +
-                        "  &redirect_uri=https://www.oauth.com/playground/authorization-code-with-pkce.html" +
-                        "  &scope=photo+offline_access" +
-                        "  &state=" + state +
-                        "  &code_challenge=" + codeChallenge +
-                        "  &code_challenge_method=S256";
+                final String authorizationURL = "http://localhost:8080/default/authorize?" +
+                        "response_type=code" +
+                        "&client_id=4aw6ppymEN7zxUVJL9wB1WSc" +
+                        "&redirect_uri=http://localhost:8085/callback" +
+                        "&scope=openid%20profile%20email" +
+                        "&state=" + state +
+                        "&code_challenge=" + codeChallenge +
+                        "&code_challenge_method=S256";
 
                 statesCodeVerifiers.put(state, new SessionAuthorization(httpRequest.deviceId().get(), codeVerifier));
                 return (_, lookup)  -> {
