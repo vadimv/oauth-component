@@ -57,7 +57,7 @@ public class BasicAuthComponentDefinition<S> extends StatefulComponentDefinition
             if (authorizationState instanceof AuthorizationState.NotAuthorized<S>) {
                 return html(
                         text("Not authorized")
-                ).addHeaders(Map.of("WWW-Authenticate", "Basic realm=\"User Visible Realm\", charset=\"UTF-8\"" )).statusCode(401);
+                ).addHeader("WWW-Authenticate", "Basic realm=\"User Visible Realm\", charset=\"UTF-8\"").statusCode(401);
             } else {
                 return componentDefinition;
             }
