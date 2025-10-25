@@ -67,7 +67,9 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                     && authorizedSessions.containsKey(httpRequest.deviceId().get())) {
                 logger.log(System.Logger.Level.DEBUG, "Accessing the protected path with an authorised device session: " + httpRequest.deviceId());
                 return (_, lookup)  -> {
-                    lookup.put("user", "user1");
+                    // Get user info from the session and store in the lookup
+                    lookup.put("user", "test_user");
+
                     return new AuthorizationState.Authorized<>();
                 };
             } else if (httpRequest.path.startsWith(protectedPath)) {
@@ -155,21 +157,54 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                         final Optional<JsonDataType> accessToken = tokenJsonObject.value("access_token");
                         final Optional<JsonDataType> scope = tokenJsonObject.value("scope");
                         final Optional<JsonDataType> refreshToken = tokenJsonObject.value("refresh_token");
-                       // TODO validate all
-
-                        validateToken(accessToken.get().asJsonString().value());
 
                        if (accessToken.isPresent()
                                && accessToken.get() instanceof JsonDataType.String(String value)
                                && !value.isEmpty()) {
-                           // Save current session deviceId as an authorized session
-                           authorizedSessions.put(codeVerifier.deviceId, codeVerifier.deviceId);
+                           // Verify the access token,
+                           // use an introspection endpoint  http://localhost:8080/default/introspect
+                           final boolean authorized = validateToken(accessToken.get().asJsonString().value());
 
-                           return (_, lookup) -> {
-                               lookup.put("user", scope);
-                               final RelativeUrl redirectUrl = unauthorizedURLs.remove(httpRequest.deviceId().get());
-                               return new AuthorizationState.Redirect(redirectUrl.toString());
-                           };
+                           // Get the user's details, use the access token to make a GET request to the UserInfo endpoint
+                           // e.g. http://localhost:8080/default/userinfo
+                           // to get the relevant user information fields
+                           final String userInfoURL = "http://localhost:8080/default/userinfo";
+                           final java.net.http.HttpRequest userInfoRequest = java.net.http.HttpRequest.newBuilder()
+                                   .uri(URI.create(userInfoURL))
+                                   .header("Authorization", "Bearer " + accessToken.get().asJsonString().value())
+                                   .GET()
+                                   .build();
+                           final java.net.http.HttpResponse<String> userInfoResponse;
+                           try (java.net.http.HttpClient httpClient = java.net.http.HttpClient.newHttpClient()) {
+                               try {
+                                   System.out.println(accessToken.get().asJsonString().value());
+                                   userInfoResponse = httpClient.send(userInfoRequest, java.net.http.HttpResponse.BodyHandlers.ofString());
+                               } catch (IOException | InterruptedException e) {
+                                   throw new AuthException("An error occurred while requesting user info:" + userInfoRequest, e);
+                               }
+                           }
+                           if (userInfoResponse.statusCode() != 200) {
+                               throw new AuthException("Unexpected HTTP status code: "+ response.statusCode() + " while requesting user info at " + userInfoURL);
+                           }
+                           System.out.println(userInfoResponse.body());
+                           final String userName = "test_user";
+                           // Save user information in session
+
+                           if (authorized) {
+                               // Save current session deviceId as an authorized session
+                               authorizedSessions.put(codeVerifier.deviceId, codeVerifier.deviceId);
+
+
+                               return (_, lookup) -> {
+                                   final RelativeUrl redirectUrl = unauthorizedURLs.remove(httpRequest.deviceId().get());
+                                   if (redirectUrl != null) {
+                                       return new AuthorizationState.Redirect(redirectUrl.toString());
+                                   } else {
+                                       return new AuthorizationState.Redirect("/app");
+                                   }
+
+                               };
+                           }
                        }
 
                     } else {
@@ -199,7 +234,7 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
         //if (System.currentTimeMillis() / 10 > timestamp) throw new AuthException("Invalid timestamp");
 
 
-        return false;
+        return true;
     }
 
     private static String decodeBase64(String string) {
