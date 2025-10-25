@@ -7,6 +7,7 @@ import rsp.component.ComponentView;
 import rsp.component.definitions.StatefulComponentDefinition;
 import rsp.component.definitions.lookup.AddressBarLookupComponentDefinition;
 import rsp.server.http.HttpRequest;
+import rsp.server.http.RelativeUrl;
 import rsp.util.json.JsonDataType;
 import rsp.util.json.JsonSimpleUtils;
 
@@ -30,16 +31,21 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
     private static final Logger log = LoggerFactory.getLogger(OAuthPKCEComponentDefinition.class);
     private final System.Logger logger = System.getLogger(getClass().getName());
     private final HttpRequest httpRequest;
+    private final String protectedPath;
     private final StatefulComponentDefinition<O> protectedComponentDefinition;
     private final StatefulComponentDefinition<P> openComponentDefinition;
     private static final Map<String, String> authorizedSessions = new ConcurrentHashMap<>();
+    private static final Map<String, RelativeUrl> unauthorizedURLs = new ConcurrentHashMap<>();
     private static final Map<String, SessionAuthorization> statesCodeVerifiers = new ConcurrentHashMap<>();
 
     public OAuthPKCEComponentDefinition(HttpRequest httpRequest,
+                                        String protectedPath,
                                         StatefulComponentDefinition<O> protectedComponentDefinition,
                                         StatefulComponentDefinition<P> openComponentDefinition) {
         super(AddressBarLookupComponentDefinition.class);
         this.httpRequest = Objects.requireNonNull(httpRequest);
+        this.protectedPath = protectedPath;
+
         this.protectedComponentDefinition = Objects.requireNonNull(protectedComponentDefinition);
         this.openComponentDefinition = Objects.requireNonNull(openComponentDefinition);
     }
@@ -47,21 +53,65 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
     @Override
     public ComponentStateSupplier<AuthorizationState> stateSupplier() {
         try {
-            if (httpRequest.deviceId().isPresent() && authorizedSessions.containsKey(httpRequest.deviceId().get())) {
-                logger.log(System.Logger.Level.DEBUG, "Session is authorised on the device: " + httpRequest.deviceId());
+            if (httpRequest.path.startsWith("logout")) {
+                logger.log(System.Logger.Level.DEBUG, "Logout: " + httpRequest.deviceId());
+                if (httpRequest.deviceId().isPresent()) {
+                    authorizedSessions.remove(httpRequest.deviceId().get());
+                }
+                return (_, lookup)  -> {
+                    lookup.remove("user");
+                    return new AuthorizationState.Redirect("/");
+                };
+            } else if (httpRequest.path.startsWith(protectedPath)
+                    && httpRequest.deviceId().isPresent()
+                    && authorizedSessions.containsKey(httpRequest.deviceId().get())) {
+                logger.log(System.Logger.Level.DEBUG, "Accessing the protected path with an authorised device session: " + httpRequest.deviceId());
                 return (_, lookup)  -> {
                     lookup.put("user", "user1");
-                    return new AuthorizationState.Authorized<>(protectedComponentDefinition.stateSupplier());
+                    return new AuthorizationState.Authorized<>();
                 };
-            } else if (httpRequest.path.startsWith("logout")) {
-                logger.log(System.Logger.Level.DEBUG, "Logout: " + httpRequest.deviceId());
-                httpRequest.deviceId().ifPresent(authorizedSessions::remove);
+            } else if (httpRequest.path.startsWith(protectedPath)) {
+                logger.log(System.Logger.Level.DEBUG, "Trying to access the protected path, redirecting to the login page");
+                return (_, lookup)  -> {
+                    final String sessionId = (String) lookup.get("sessionId");
+                    final String deviceId = (String) lookup.get("deviceId");
+                    unauthorizedURLs.put(deviceId, httpRequest.relativeUrl());
 
+                    return new AuthorizationState.Redirect("/login.html");
+                };
+            } else if  (httpRequest.deviceId().isPresent() && httpRequest.path.startsWith("login")) {
+                logger.log(System.Logger.Level.DEBUG, "Staring OAuth 2 PKCE flow..");
+
+                // 1. Create a Code Verifier and Challenge
+                final String codeVerifier = generateRandomString(64);
+                final String codeChallenge;
+                try {
+                    codeChallenge = generateCodeChallange(codeVerifier);
+                } catch (UnsupportedEncodingException | NoSuchAlgorithmException e) {
+                    throw new AuthException(e);
+                }
+
+                // 2. Build the Authorization URL
+                final String state = generateRandomString(16);
+                final String authorizationURL = "http://localhost:8080/default/authorize?" +
+                        "response_type=code" +
+                        "&client_id=4aw6ppymEN7zxUVJL9wB1WSc" +
+                        "&redirect_uri=http://localhost:8085/callback" +
+                        "&scope=openid%20profile%20email" +
+                        "&state=" + state +
+                        "&code_challenge=" + codeChallenge +
+                        "&code_challenge_method=S256";
+
+                statesCodeVerifiers.put(state, new SessionAuthorization(httpRequest.deviceId().get(), codeVerifier));
+                return (_, lookup)  -> {
+                    return new AuthorizationState.Redirect(authorizationURL);
+                };
             } else if (httpRequest.path.startsWith("callback")) {
                 logger.log(System.Logger.Level.DEBUG, "Callback URL hit");
                 final Optional<String> stateQueryParameterValue = httpRequest.queryParameters.parameterValue("state");
                 final Optional<String> codeQueryParameterValue = httpRequest.queryParameters.parameterValue("code");
                 if (stateQueryParameterValue.isPresent() && codeQueryParameterValue.isPresent()) {
+
                     // 3. Verify the state parameter
                     final SessionAuthorization codeVerifier = statesCodeVerifiers.remove(stateQueryParameterValue.get());
                     if (codeVerifier == null) {
@@ -107,6 +157,8 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                         final Optional<JsonDataType> refreshToken = tokenJsonObject.value("refresh_token");
                        // TODO validate all
 
+                        validateToken(accessToken.get().asJsonString().value());
+
                        if (accessToken.isPresent()
                                && accessToken.get() instanceof JsonDataType.String(String value)
                                && !value.isEmpty()) {
@@ -115,7 +167,8 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
 
                            return (_, lookup) -> {
                                lookup.put("user", scope);
-                               return new AuthorizationState.Authorized<>(protectedComponentDefinition.stateSupplier());
+                               final RelativeUrl redirectUrl = unauthorizedURLs.remove(httpRequest.deviceId().get());
+                               return new AuthorizationState.Redirect(redirectUrl.toString());
                            };
                        }
 
@@ -123,38 +176,7 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                         throw new AuthException("Unexpected token format");
                     }
 
-                } else {
-                    logger.log(System.Logger.Level.DEBUG, "Required callback query parameter(s) 'state' and/or 'code' is missing.");
                 }
-             } else if (httpRequest.deviceId().isPresent() && httpRequest.path.startsWith("login")) {
-                logger.log(System.Logger.Level.DEBUG, "Staring OAuth 2 PKCE flow..");
-
-                // 1. Create a Code Verifier and Challenge
-                final String codeVerifier = generateRandomString(64);
-                final String codeChallenge;
-                try {
-                    codeChallenge = generateCodeChallange(codeVerifier);
-                } catch (UnsupportedEncodingException | NoSuchAlgorithmException e) {
-                    throw new AuthException(e);
-                }
-
-                // 2. Build the Authorization URL
-                final String state = generateRandomString(16);
-                final String authorizationURL = "http://localhost:8080/default/authorize?" +
-                        "response_type=code" +
-                        "&client_id=4aw6ppymEN7zxUVJL9wB1WSc" +
-                        "&redirect_uri=http://localhost:8085/callback" +
-                        "&scope=openid%20profile%20email" +
-                        "&state=" + state +
-                        "&code_challenge=" + codeChallenge +
-                        "&code_challenge_method=S256";
-
-                statesCodeVerifiers.put(state, new SessionAuthorization(httpRequest.deviceId().get(), codeVerifier));
-                return (_, lookup)  -> {
-                    return new AuthorizationState.RedirectToLoginAuthorisationPrompt(authorizationURL);
-                };
-             } else {
-                logger.log(System.Logger.Level.WARNING, () -> "Session is not established on the device");
             }
 
         } catch (AuthException e) {
@@ -167,7 +189,22 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
         };
     }
 
+    private boolean validateToken(String token) throws AuthException {
+        final String[] parts = token.split("\\.");
+        final JsonDataType header = JsonSimpleUtils.parse(decodeBase64(parts[0]));
+        final JsonDataType payload = JsonSimpleUtils.parse(decodeBase64(parts[1]));
+        final String signature = decodeBase64(parts[2]);
+        // Check the expire timestamp
+        //final long timestamp = payload.asJsonObject().value("exp").get().asJsonNumber().asLong();
+        //if (System.currentTimeMillis() / 10 > timestamp) throw new AuthException("Invalid timestamp");
 
+
+        return false;
+    }
+
+    private static String decodeBase64(String string) {
+        return new String(Base64.getUrlDecoder().decode(string));
+    }
 
     private static String generateRandomString(int length) {
         final SecureRandom secureRandom = new SecureRandom();
@@ -192,7 +229,7 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
         return _ -> authorizationState -> {
             if (authorizationState instanceof AuthorizationState.NotAuthorized) {
                 return openComponentDefinition;
-            } else if (authorizationState instanceof AuthorizationState.RedirectToLoginAuthorisationPrompt(String redirectUrl)) {
+            } else if (authorizationState instanceof AuthorizationState.Redirect(String redirectUrl)) {
                 return html().redirect(redirectUrl);
             } else if (authorizationState instanceof AuthorizationState.Authorized) {
                 return protectedComponentDefinition;
@@ -207,12 +244,15 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
         record NotAuthorized() implements AuthorizationState {
         };
 
-        record RedirectToLoginAuthorisationPrompt(String redirectUrl) implements AuthorizationState {
+        record Redirect(String redirectUrl) implements AuthorizationState {
         }
 
-        record Authorized<S>(ComponentStateSupplier<S> wrappedState) implements AuthorizationState {
+        record Authorized<S>() implements AuthorizationState {
         }
-    }
+
+        record Logout() implements AuthorizationState {
+        }
+   }
 
     private record SessionAuthorization(String deviceId, String codeVerifier) {
         private SessionAuthorization {
