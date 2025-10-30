@@ -37,6 +37,7 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
     private static final Map<String, String> authorizedSessions = new ConcurrentHashMap<>();
     private static final Map<String, RelativeUrl> unauthorizedURLs = new ConcurrentHashMap<>();
     private static final Map<String, SessionAuthorization> statesCodeVerifiers = new ConcurrentHashMap<>();
+    private static final Map<String, String> userNames = new ConcurrentHashMap<>();
 
     public OAuthPKCEComponentDefinition(HttpRequest httpRequest,
                                         String protectedPath,
@@ -68,7 +69,9 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                 logger.log(System.Logger.Level.DEBUG, "Accessing the protected path with an authorised device session: " + httpRequest.deviceId());
                 return (_, lookup)  -> {
                     // Get user info from the session and store in the lookup
-                    lookup.put("user", "test_user");
+                    final String userName = userNames.get(httpRequest.deviceId().get());
+                    System.out.println("user2:" + userName);
+                    lookup.put("user", userName);
 
                     return new AuthorizationState.Authorized<>();
                 };
@@ -95,15 +98,15 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
 
                 // 2. Build the Authorization URL
                 final String state = generateRandomString(16);
-                final String authorizationURL = "http://localhost:8080/default/authorize?" +
+                final String authorizationURL = "http://localhost:8080/realms/master/protocol/openid-connect/auth?" +
                         "response_type=code" +
-                        "&client_id=4aw6ppymEN7zxUVJL9wB1WSc" +
+                        "&client_id=pkce-client" +
                         "&redirect_uri=http://localhost:8085/callback" +
                         "&scope=openid%20profile%20email" +
                         "&state=" + state +
                         "&code_challenge=" + codeChallenge +
                         "&code_challenge_method=S256";
-
+                System.out.println("code verifier " + codeVerifier);
                 statesCodeVerifiers.put(state, new SessionAuthorization(httpRequest.deviceId().get(), codeVerifier));
                 return (_, lookup)  -> {
                     return new AuthorizationState.Redirect(authorizationURL);
@@ -122,14 +125,16 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
 
                     // 4. Exchange the Authorization Code
                     // build a POST request to the token endpoint
-                    final String tokenRequestURL = "http://localhost:8080/default/token";
+                    final String tokenRequestURL = "http://localhost:8080/realms/master/protocol/openid-connect/token";
                     final String tokenRequestQueryParametersString =
                             "grant_type=authorization_code" +
-                            "&client_id=4aw6ppymEN7zxUVJL9wB1WSc" +
+                            "&client_id=pkce-client" +
                             "&client_secret=BfoMogOMp9ZFenyvQhNU5OE-F9iv9ONr8yKByo8VKw1uFtKH" +
                             "&redirect_uri=http://localhost:8085/callback" +
-                            "&code=" + codeQueryParameterValue +
+                            "&code=" + codeQueryParameterValue.get() +
                             "&code_verifier=" + codeVerifier.codeVerifier;
+
+                    System.out.println(tokenRequestQueryParametersString);
 
                     final java.net.http.HttpRequest tokenRequest = java.net.http.HttpRequest.newBuilder()
                             .uri(URI.create(tokenRequestURL))
@@ -152,32 +157,30 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                     final JsonDataType tokenJson = JsonSimpleUtils.parse(body);
                     if (tokenJson instanceof JsonDataType.Object tokenJsonObject) {
                         // Token Endpoint Response: the response includes the access token and refresh token
-                        final Optional<JsonDataType> tokenType = tokenJsonObject.value("token_type");
-                        final Optional<JsonDataType> expiresIn = tokenJsonObject.value("expires_in");
-                        final Optional<JsonDataType> accessToken = tokenJsonObject.value("access_token");
-                        final Optional<JsonDataType> scope = tokenJsonObject.value("scope");
-                        final Optional<JsonDataType> refreshToken = tokenJsonObject.value("refresh_token");
+                        final JsonDataType tokenType = tokenJsonObject.value("token_type");
+                        final JsonDataType expiresIn = tokenJsonObject.value("expires_in");
+                        final JsonDataType accessTokenJson = tokenJsonObject.value("access_token");
+                        final JsonDataType scope = tokenJsonObject.value("scope");
+                        final JsonDataType refreshToken = tokenJsonObject.value("refresh_token");
 
-                       if (accessToken.isPresent()
-                               && accessToken.get() instanceof JsonDataType.String(String value)
-                               && !value.isEmpty()) {
+                       if (accessTokenJson instanceof JsonDataType.String(String accessToken) && !accessToken.isEmpty()) {
                            // Verify the access token,
                            // use an introspection endpoint  http://localhost:8080/default/introspect
-                           final boolean authorized = validateToken(accessToken.get().asJsonString().value());
+                           final boolean authorized = validateToken(accessToken);
 
                            // Get the user's details, use the access token to make a GET request to the UserInfo endpoint
                            // e.g. http://localhost:8080/default/userinfo
                            // to get the relevant user information fields
-                           final String userInfoURL = "http://localhost:8080/default/userinfo";
+                           final String userInfoURL = "http://localhost:8080/realms/master/protocol/openid-connect/userinfo";
                            final java.net.http.HttpRequest userInfoRequest = java.net.http.HttpRequest.newBuilder()
                                    .uri(URI.create(userInfoURL))
-                                   .header("Authorization", "Bearer " + accessToken.get().asJsonString().value())
+                                   .header("Authorization", "Bearer " + accessToken)
                                    .GET()
                                    .build();
                            final java.net.http.HttpResponse<String> userInfoResponse;
                            try (java.net.http.HttpClient httpClient = java.net.http.HttpClient.newHttpClient()) {
                                try {
-                                   System.out.println(accessToken.get().asJsonString().value());
+                                   System.out.println(accessToken);
                                    userInfoResponse = httpClient.send(userInfoRequest, java.net.http.HttpResponse.BodyHandlers.ofString());
                                } catch (IOException | InterruptedException e) {
                                    throw new AuthException("An error occurred while requesting user info:" + userInfoRequest, e);
@@ -187,8 +190,15 @@ public class OAuthPKCEComponentDefinition<O, P> extends StatefulComponentDefinit
                                throw new AuthException("Unexpected HTTP status code: "+ response.statusCode() + " while requesting user info at " + userInfoURL);
                            }
                            System.out.println(userInfoResponse.body());
-                           final String userName = "test_user";
-                           // Save user information in session
+                           final JsonDataType userInfoJson = JsonSimpleUtils.parse(userInfoResponse.body());
+                           if (userInfoJson instanceof JsonDataType.Object jsonDataType
+                                   && jsonDataType.value("preferred_username") instanceof JsonDataType.String(String userName)){
+                               System.out.println("user: " + userName);
+                               // Save user information in session
+                               userNames.put(httpRequest.deviceId().get(), userName);
+                           } else {
+                               throw new AuthException("");
+                           }
 
                            if (authorized) {
                                // Save current session deviceId as an authorized session
